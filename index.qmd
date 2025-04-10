@@ -1,0 +1,229 @@
+---
+title: "Control de calidad de la velocidad"
+author: "Mariana Morales"
+format:
+  html:
+    toc: true      # Activa el índice
+    toc-title: "Índice"  # Cambia el título del índice (opcional)
+    toc-depth: 2   # Profundidad del índice (niveles de encabezado)
+    number-sections: true  # Numera las secciones
+editor: visual
+---
+
+## Código
+
+Este código fue creado utilizando Rstudio version 2024.12.1 mediante la creación de un documeto quarto.
+
+```{r}
+#| warning: false
+#| message: false
+
+# Cargar librerías
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(readr)
+library(plotly)
+library(zoo)
+```
+
+```{r}
+#| warning: false
+#| message: false
+
+# Cargar los archivos
+datos <- read.table("C:\\Users\\marin\\Documents\\Trabajo\\Dayos Guillaume\\Rstudio quarto\\Datos sensores3.csv", sep = ";", dec = ",", header = TRUE)
+
+# Convertir a numeros
+datos$Vitesse <- as.numeric(datos$Vitesse)
+datos$VEGA_E <- as.numeric(datos$VEGA_E)
+```
+
+```{r}
+# Guardamos los valores originales para comparar
+datos$Vitesse_original <- datos$Vitesse  # o guardalo antes de aplicar filtros si querés ver el cambio real
+```
+
+```{r}
+# Convertir VEGA_E a numérico, reemplazando comas por puntos
+datos <- datos %>% mutate(VEGA_E = as.numeric(gsub(",", ".", VEGA_E)))
+```
+
+### Filtro de valores repetidos
+
+Si hay más de tres valores repetidos consecutivos se cambiará el valor al código NaN
+
+```{r}
+# Detectar secuencias de valores consecutivos iguales
+rle_vitesse <- rle(datos$Vitesse)
+
+# Crear un vector lógico con TRUE en las posiciones que deben ser reemplazadas por NaN
+to_replace <- inverse.rle(with(rle_vitesse, {
+  list(lengths = lengths, values = lengths > 3)
+}))
+
+# Reemplazar esos valores por NaN
+datos$Vitesse[to_replace] <- NaN
+```
+
+### Filtro de outliers
+
+Para esto lo mejor es usar una media móvil, se tomó en cuenta la resolución temporal por lo que el tamaño de la media móvil será de 4 mediciones (40 minutos). Si la diferencia entre el valor y la media móvil es mayor a un 30% entonces se consideran como outliers.
+
+```{r}
+# Asegurate que vitesse sea numérico
+datos$Vitesse <- as.numeric(datos$Vitesse)
+
+# Calcular la media móvil con ventana de 3
+media_movil <- zoo::rollapply(datos$Vitesse, width = 4, FUN = mean, align = "center", fill = NA)
+
+# Calcular el porcentaje de diferencia
+diferencia_relativa <- abs(datos$Vitesse - media_movil) / media_movil
+
+# Marcar como outliers los valores con más de 30% de diferencia
+outliers <- diferencia_relativa > 0.3
+
+# Reemplazar por NaN
+datos$Vitesse[outliers] <- NaN
+```
+
+## Filtro para los límites físicos
+
+La velocidad máxima en superficie de un río natural es de 7 m/s y el límite mínimo recomendado es el 0.02 m/s, todo lo que esté fuera de este rango se colocará como NaN.
+
+```{r}
+
+# Aplicar el filtro y asignar NaN a los valores fuera de rango
+datos$Vitesse[datos$Vitesse < 20 | datos$Vitesse > 7000] <- NaN
+```
+
+## Filtro para el SNR
+
+Los datos con un valor de SNR inferior a 10 dBm pueden no ser precisos y los que se encuentran menores a 6 no son confiables.
+
+```{r}
+#| warning: false
+#| message: false
+
+# Asegurate que vitesse sea numérico
+datos$SNR_avg <- as.numeric(datos$SNR_avg)
+
+# Filtrar y asignar NaN a la variable 'Vitesse' cuando 'SNR' es menor a 10
+datos$Vitesse[datos$SNR_avg < 10] <- NaN
+
+# Verifica el cambio en los datos
+summary(datos$Vitesse)
+```
+
+```{r}
+# Guardar el resultado final con ; como separador
+write_delim(datos, "datos_velocidad_filtrados.csv", delim = ",")
+```
+
+## Gráfico de velocidad
+
+```{r}
+# Cargar los archivos
+filtrados <- read_delim("datos_velocidad_filtrados.csv", delim = ",", col_types = cols(.default = "c"))
+
+#Eliminar filas con datos NaN
+#datos_sin_NaN <- drop_na(datos)
+
+#Convertir DateTime a tipo fecha
+datos$DateTime <- as.POSIXct(datos$DateTime, format = "%d/%m/%Y %H:%M")
+```
+
+```{r}
+#| warning: false
+#| message: false
+
+# Crear la gráfica interactiva
+fig <- plot_ly()
+
+fig <- fig %>% add_markers(
+  x = datos$DateTime, 
+  y = datos$Vitesse_original, 
+  name = "Vitesse original",
+  marker = list(
+    color = "gray",
+    size = 3
+  ),
+  visible = "legendonly"
+)
+
+fig <- fig %>% add_markers(
+  x = datos$DateTime, 
+  y = datos$Vitesse, 
+  name = "Vitesse",
+  marker = list(
+    color = "blue", 
+    size = 3
+  )
+)
+
+fig <- fig %>% layout(
+  title = "Quality Control: Filtered Vitesse and original Vitesse",
+  xaxis = list(title = "Fecha", type = "date"),
+  yaxis = list(
+    title = "VEGA_E",
+    side = "left",
+    showgrid = FALSE
+  ),
+  yaxis2 = list(
+    side = "right",
+    overlaying = "y",
+    showgrid = TRUE,
+    title_standoff = 30,  # Ajustar la distancia entre el título y el eje
+    ticklen = 6,          # Ajustar la longitud de las marcas de los ticks
+    tickangle = 0         # Ajustar el ángulo
+  ),
+  legend = list(
+    orientation = "h",     # horizontal
+    x = 0,                 # alineado a la izquierda
+    y = -0.2               # debajo del eje X
+  ),
+  hovermode = "x",
+  width = 800,
+  height = 450,
+  margin = list(r = 100)  # Ajustar el margen derecho para dar espacio al eje secundario
+)
+
+# Mostrar la gráfica interactiva
+fig
+```
+
+
+
+## Gráfico de velocidad vs Nivel
+
+```{r}
+
+
+# Crear un nuevo data frame sin valores NA/NaN
+df <- na.omit(datos[, c("DateTime", "VEGA_E", "Vitesse")])
+y_max <- max(df$VEGA_E)
+
+# Crear el gráfico interactivo
+fig <- plot_ly(
+  data = df,
+  x = ~VEGA_E,
+  y = ~Vitesse,
+  type = 'scatter',
+  mode = 'markers',
+  marker = list(color = 'darkblue', size = 6),
+  text = ~paste("Fecha:", DateTime, "<br>VEGA_E:", VEGA_E, "<br>Vitesse:", Vitesse),
+  hoverinfo = 'text',
+  name = "Vitesse filtrada vs VEGA_E"
+)
+
+# Personalizar diseño
+fig <- fig %>% layout(
+  title = "Relación entre VEGA_E y Vitesse filtrada (sin NaN)",
+  xaxis = list(title = "VEGA_E"),
+  yaxis = list(title = "Vitesse filtrada (m/s)"),
+  hovermode = "closest"
+)
+
+# Mostrar gráfico
+fig
+```
